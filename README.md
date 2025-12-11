@@ -14,4 +14,8 @@
   
   run_#runnumber_Mod16_offsets.csv
 
-To apply MemCell offsets, you need to reorder the waveform to memory cell order using the FCR before applying the offsets. If using mod16 offsets, time order is sufficient.
+To apply MemCell offsets, you need to reorder the waveform to memory cell order using the FCR before applying the offsets. If using mod16 offsets, time order is sufficient. Functions for these are in the offset.C file. 
+
+To reorder you will need the following functions
+
+get_cell, reorder_waveform, inverse_reorder_waveform
