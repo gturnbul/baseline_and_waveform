@@ -1,567 +1,9 @@
-#include <iostream>
-#include <fstream>
-#include <sstream>
-#include <vector>
-#include <set>
-#include <memory>
-#include <string>
-#include <cmath>         // For math functions (with _USE_MATH_DEFINES)
-#include <cstdlib>       // for rand()
-#include <cassert>
-#include <thread>
-#include <map>
-#include <unordered_map>
-#include <tuple>
-#include <complex>
-
-// System / OS
-#include <sys/stat.h>
-#include <sys/types.h>
-
-// ROOT Core
-#include "TROOT.h"
-#include "TFile.h"
-#include "TTree.h"
-#include "TBranch.h"
-#include "TKey.h"
-#include "TParameter.h"
-#include <TString.h>
-#include <TObjArray.h>
-
-// ROOT Graphics / Canvas
-#include "TCanvas.h"
-#include "TStyle.h"
-#include "TLine.h"
-#include <TPaletteAxis.h>
-#include <TText.h>
-#include <TLatex.h>
-#include <TLegend.h>
-#include "TMultiGraph.h"
-#include <THStack.h>
-
-// ROOT Histograms / Graphs / Fitting
-#include <TH1D.h>
-#include <TH2D.h>
-#include <TH3D.h>
-#include <TGraph.h>
-#include <TGraphErrors.h>
-#include <TF1.h>
-#include "TFitResultPtr.h"
-#include "TFitResult.h"
-#include "TSpectrum.h"
-
-// ROOT Utilities
-#include <TRandom3.h>
-#include <TPaveText.h>
-#include <TArrayF.h>
-#include <TVirtualFFT.h>
-#include <TComplex.h>
-
-// Macro Definition
-#define _USE_MATH_DEFINES
-
-using namespace std;
-
-const short EMPTY_BIN = -1;
-
-//////////////////////////////////////////////////////////////////////////////////////
-////////////////////////////////  Functions //////////////////////////////////////////
-//////////////////////////////////////////////////////////////////////////////////////
-
-// Calculate the OM number from the calo udd variables
-int calculate_om_num(std::vector<int> *calo_type, std::vector<int> *calo_side, 
-                     std::vector<int> *calo_wall, std::vector<int> *calo_column, 
-                     std::vector<int> *calo_row, int k) {
-    int om_num = -1;
-    if (calo_type->at(k) == 0) {
-        om_num = calo_side->at(k) * 260 + calo_column->at(k) * 13 + calo_row->at(k);
-    } else if (calo_type->at(k) == 1) {
-        om_num = 520 + calo_side->at(k) * 64 + calo_wall->at(k) * 32 + calo_column->at(k) * 16 + calo_row->at(k);
-    } else if (calo_type->at(k) == 2) {
-        om_num = 648 + calo_side->at(k) * 32 + calo_wall->at(k) * 16 + calo_column->at(k);
-    }
-    return om_num;
-}
-
-////////////////////////////// FUNCTIONS from the WAVEFORMS ////////////////////////////////////
-// Function to calculate baseline
-double calculate_baseline976(const std::vector<short>& waveform) {
-    double baseline = 0;
-    for (int i = 0; i < 976; ++i) {
-        baseline += waveform[i];
-    }
-    return baseline / 976;
-}
-// Function to calculate baseline
-double calculate_baseline96(const std::vector<short>& waveform) {
-    double baseline = 0;
-    for (int i = 0; i < 96; ++i) {
-        baseline += waveform[i];
-    }
-    return baseline / 96;
-}
-
-double calculate_baseline48(const std::vector<short>& waveform) {
-    double baseline = 0;
-    for (int i = 976; i < 1024; ++i) {
-        baseline += waveform[i];
-    }
-    return baseline / 48;
-}
-
-// Function to calculate chi2df
-double calculate_stddev976(const std::vector<short>& waveform, double baseline) {
-    double sum_sq_diff = 0;
-    for (int i = 0; i < 976; ++i) {
-        sum_sq_diff += pow(waveform[i] - baseline, 2);
-    }
-    return sqrt(sum_sq_diff / 976);
-}
-
-double calculate_stddev48(const std::vector<short>& waveform, double baseline) {
-    double sum_sq_diff = 0;
-    for (int i = 976; i < 1024; ++i) {
-        sum_sq_diff += pow(waveform[i] - baseline, 2);
-    }
-    return sqrt(sum_sq_diff / 48);
-}
-// // Function to calculate error on the mean (EOM), with sigma calculated inside
-// double calculate_eom976(const std::vector<short>& waveform, double baseline) {
-//     double sum_sq_diff = 0.0;
-
-//     for (int i = 0; i < 976; ++i) {
-//         double diff = waveform[i] - baseline;
-//         sum_sq_diff += diff * diff;
-//     }
-
-//     double variance = sum_sq_diff / 976;      // Population variance
-//     double sigma = std::sqrt(variance);     // Standard deviation
-//     double eom = sigma / std::sqrt(976);      // Error on the mean
-
-//     return eom;
-// }
-// double calculate_eom48(const std::vector<short>& waveform, double baseline) {
-//     double sum_sq_diff = 0.0;
-
-//     for (int i = 976; i < 1024; ++i) {
-//         double diff = waveform[i] - baseline;
-//         sum_sq_diff += diff * diff;
-//     }
-
-//     double variance = sum_sq_diff / 48;          // Population variance
-//     double sigma = std::sqrt(variance);          // Standard deviation
-//     double eom = sigma / std::sqrt(48);          // Error on the mean
-
-//     return eom;
-// }
-
-struct Mod16Stats {
-    std::vector<double> offsets;
-    std::vector<double> sigmas;
-    std::vector<double> chi2ndfs;
-};
-
-Mod16Stats compute_mod16_from_fits(const std::vector<double>& means,
-                                    const std::vector<double>& sigmas,
-                                    const std::vector<double>& chi2ndfs) {
-    std::vector<double> mean_acc(16, 0.0);
-    std::vector<double> sigma_acc(16, 0.0);
-    std::vector<double> chi2ndf_acc(16, 0.0);
-    std::vector<int> counts(16, 0);
-
-    for (int i = 0; i < 976; ++i) {
-        int mod16_index = i % 16;
-        mean_acc[mod16_index] += means[i];
-        sigma_acc[mod16_index] += sigmas[i];
-        if (chi2ndfs[i] >= 0) {
-            chi2ndf_acc[mod16_index] += chi2ndfs[i];
-            counts[mod16_index]++;
-            } else {
-                static std::ofstream badfit_log("bad_fits_mod16_1278_width.csv", std::ios::app);
-                badfit_log << "OM_UNKNOWN," << i << ",ndf=0" << std::endl;  
-                // If you want OM numbers, pass it in as an argument
-        }
-    }
-
-    for (int i = 0; i < 16; ++i) {
-        if (counts[i] > 0) {
-            mean_acc[i] /= counts[i];
-            sigma_acc[i] /= counts[i];
-            chi2ndf_acc[i] /= counts[i];
-        }
-    }
-
-    return { mean_acc, sigma_acc, chi2ndf_acc };
-}
-
-
-// Get memory cell from bin number and FCR
-int get_cell(int bin_no, int fcr) {
-    return (bin_no + fcr) % 1024; // Now ranges from 0 to 1023
-}
-
-std::vector<short> reorder_waveform(const std::vector<short>& waveform, int fcr) {
-    std::vector<short> reordered(1024, EMPTY_BIN);  // initialize all bins as empty
-
-    int max_bins = std::min((int)waveform.size(), 976);  // only use bins 0 to 975
-
-    for (int i = 0; i < max_bins; ++i) {
-        int reordered_index = get_cell(i, fcr);
-        reordered[reordered_index] = waveform[i];
-    }
-
-    // bins 976 to 1023 remain EMPTY_BIN, indicating gaps
-
-    return reordered;
-}
-std::vector<short> inverse_reorder_waveform(const std::vector<short>& reordered, int fcr) {
-    int max_bins = 976;  // original waveform length
-    
-    std::vector<short> original(max_bins, EMPTY_BIN);
-    
-    for (int i = 0; i < max_bins; ++i) {
-        int reordered_index = get_cell(i, fcr);
-        // Safety check: reordered_index should be within bounds
-        if (reordered_index >= 0 && reordered_index < (int)reordered.size()) {
-            original[i] = reordered[reordered_index];
-        } else {
-            // handle unexpected index (optional)
-            original[i] = EMPTY_BIN;
-        }
-    }
-    
-    return original;
-}
-void saveWaveformAsPng(const std::vector<short>& wave,
-                       const std::string& filename,
-                       double baseline,
-                       double stddev,
-                       int om_num,
-                       int event_num)
-{
-    // Create canvas
-    TCanvas* c = new TCanvas("c", "Waveform", 800, 600);
-
-    // Draw waveform
-    TGraph* g = new TGraph(wave.size());
-    for (size_t i = 0; i < wave.size(); ++i) {
-        g->SetPoint(i, i, wave[i]);
-    }
-    g->SetTitle(Form("OM %d, Event %d;Bin;Amplitude", om_num, event_num));
-    g->GetXaxis()->SetLimits(0, 1024); // full 1024 bins
-    g->Draw("AL");
-
-    double xMin = 0;
-    double xMax = wave.size();
-
-    // --- ±2σ band (green, semi-transparent) ---
-    TBox* box2 = new TBox(xMin,
-                          baseline - 2 * stddev,
-                          xMax,
-                          baseline + 2 * stddev);
-    box2->SetFillColorAlpha(kGreen, 0.3);
-    box2->Draw("same");
-
-    // --- ±1σ band (yellow, more opaque) ---
-    TBox* box1 = new TBox(xMin,
-                          baseline - stddev,
-                          xMax,
-                          baseline + stddev);
-    box1->SetFillColorAlpha(kYellow, 0.6);
-    box1->Draw("same");
-
-    // --- Baseline (red line) ---
-    TLine* line = new TLine(xMin, baseline, xMax, baseline);
-    line->SetLineColor(kRed);
-    line->SetLineWidth(2);
-    line->Draw("same");
-
-    // Redraw waveform on top
-    g->Draw("L same");
-
-    // Save to file
-    c->SaveAs(filename.c_str());
-
-    // Cleanup
-    delete line;
-    delete box1;
-    delete box2;
-    delete g;
-    delete c;
-}
-
-// 2D histogram: X = OM number, Y = Bin number, Z = counts
-int max_om = 712;        // number of OMs (from your QA loop)
-int max_bins = 1024;     // waveform bins
-TH2D *h2_bin_om = new TH2D("h2_bin_om", "Bin vs OM;Bin number;OM number;Counts",
-                           max_bins, 0, max_bins,
-                           max_om, 0, max_om);
-
-
-//////////////////////////////////////////////////////////////////////////////////////
-////////////////////////////////  Main ///////////////////////////////////////////////
-//////////////////////////////////////////////////////////////////////////////////////
-int main(int argc, char* argv[])
-{
-    if (argc < 2) {
-        cerr << "Usage: " << argv[0] << " <run_number>" << endl;
-        return 1;
-    }
-
-    int run_number = stoi(argv[1]);
-
-    string input_filename  = "snemo_run-" + to_string(run_number) + "_udd.root";
-    string output_filename = "baseline_offset_calc_V3-" + to_string(run_number) + ".root";
-
-    cout << "Reading:  " << input_filename  << endl;
-    cout << "Writing:  " << output_filename << endl;
-
-    // Open input file
-    TFile* file = new TFile(input_filename.c_str(), "READ");
-    TTree* tree = (TTree*)file->Get("SimData");
-
-    // Variables for branches
-    std::vector<std::vector<short>> *wave = nullptr;
-    std::vector<int> *calo_wall = nullptr;
-    std::vector<int> *calo_side = nullptr;
-    std::vector<int> *calo_column = nullptr;
-    std::vector<int> *calo_row = nullptr;
-    std::vector<int> *calo_type = nullptr;
-    std::vector<int> *fcr = nullptr;
-    std::vector<int> *timestamp = nullptr;
-    int calo_nohits = 0;
-
-    // Set branch addresses
-    tree->SetBranchAddress("digicalo.nohits", &calo_nohits);
-    tree->SetBranchAddress("digicalo.waveform", &wave);
-    tree->SetBranchAddress("digicalo.wall", &calo_wall);
-    tree->SetBranchAddress("digicalo.side", &calo_side);
-    tree->SetBranchAddress("digicalo.column", &calo_column);
-    tree->SetBranchAddress("digicalo.row", &calo_row);
-    tree->SetBranchAddress("digicalo.type", &calo_type);
-    tree->SetBranchAddress("digicalo.fcr", &fcr);
-    tree->SetBranchAddress("digicalo.timestamp", &timestamp);
-
-
-    // Get the number of entries in the tree
-    int max_entries = tree->GetEntries();
-    std::cout << "Total entries in tree: " << max_entries << std::endl;
-
-    // Create output ROOT file and TTree for baseline data
-    TFile* outfile = new TFile(output_filename.c_str(), "RECREATE");
-    TTree *baseline_tree = new TTree("baseline_tree", "OM baseline data");
-
-    TTree *qaTree = new TTree("qaTree", "FEB/Wavecatcher QA");
-
-    // Initialise output variables
-    int event_num = -1;
-    int om_num = -1;
-    int calo_fcr = -1;
-    double width = 0;
-    // int maxConsec = 0;
-    double baseline_orig = 0;
-    double baseline_delta = 0;
-    double baseline_diff = 0;
-    double stddev_orig = 0;
-    // double eom_orig = 0;
-    double end_baseline = 0;
-    double end_stddev = 0;
-    // double end_eom = 0;
-    
-    double gradient = 0;
-    double intercept = 0;
-    double chi2ndf = 0;
-    int peak_flag = -1;
-
-    // Variables for the 1024 FEB offset correction
-    double baseline_feb = 0;
-    double stddev_feb = 0;
-    // double eom_feb = 0;
-  
-    //first 976 variables after wavecatcher (mod16) correction
-    double baseline_976 = 0;
-    double stddev_976 = 0;
-    // double eom_976 = 0;
-
-    //end spike variables after end of waveform correction
-    double baseline_end = 0;
-    double stddev_end = 0;
-    // double eom_end = 0;
-
-    //Quality assurance variables
-    int qa_om_num = -1;
-    std::vector<double> mean_mem;
-    std::vector<double> sigma_mem;
-    std::vector<double> chi2ndf_mem; 
-    
-    std::vector<double> mean_timeo;
-    std::vector<double> sigma_timeo;
-    std::vector<double> chi2ndf_timeo;
-
-    // Create branches in the output tree
-    baseline_tree->Branch("event_num", &event_num, "event_num/I");
-    baseline_tree->Branch("om_num", &om_num, "om_num/I");
-    baseline_tree->Branch("calo_fcr", &calo_fcr, "calo_fcr/I");
-    baseline_tree->Branch("width", &width, "width/D");
-    // baseline_tree->Branch("maxConsec", &maxConsec, "maxConsec/I");
-    baseline_tree->Branch("baseline", &baseline_orig, "baseline/D");
-    baseline_tree->Branch("baseline_delta", &baseline_delta, "baseline_delta/D");
-    baseline_tree->Branch("baseline_diff", &baseline_diff, "baseline_diff/D");
-    baseline_tree->Branch("stddev", &stddev_orig, "stddev/D");
-    // baseline_tree->Branch("eom", &eom_orig, "eom/D");
-    baseline_tree->Branch("end_baseline", &end_baseline, "end_baseline/D");
-    baseline_tree->Branch("end_stddev", &end_stddev, "end_stddev/D");
-    // baseline_tree->Branch("end_eom", &end_eom, "end_eom/D");
-
-    baseline_tree->Branch("gradient", &gradient, "gradient/D");
-    baseline_tree->Branch("chi2ndf", &chi2ndf, "chi2ndf/D");
-    baseline_tree->Branch("peak_flag", &peak_flag, "peak_flag/I");
-
-    baseline_tree->Branch("baseline_feb", &baseline_feb, "baseline_feb/D");
-    baseline_tree->Branch("stddev_feb", &stddev_feb, "stddev_feb/D");
-    // baseline_tree->Branch("eom_feb", &eom_feb, "eom_feb/D");
-
-    baseline_tree->Branch("baseline_976", &baseline_976, "baseline_976/D");
-    baseline_tree->Branch("stddev_976", &stddev_976, "stddev_976/D");
-    // baseline_tree->Branch("eom_976", &eom_976, "eom_976/D");
-
-    baseline_tree->Branch("baseline_end", &baseline_end, "baseline_end/D");
-    baseline_tree->Branch("stddev_end", &stddev_end, "stddev_end/D");
-    // baseline_tree->Branch("eom_end", &eom_end, "eom_end/D");
-
-    qaTree->Branch("om_num", &qa_om_num, "om_num/I");
-    qaTree->Branch("mean_mem", &mean_mem);
-    qaTree->Branch("sigma_mem", &sigma_mem);
-    qaTree->Branch("chi2ndf_mem", &chi2ndf_mem);    
-    
-    qaTree->Branch("mean_timeo", &mean_timeo);
-    qaTree->Branch("sigma_timeo", &sigma_timeo);
-    qaTree->Branch("chi2ndf_timeo", &chi2ndf_timeo);
-
-    //////////////////////////// MAPS ////////////////////////////////////////
-    std::map<int, std::vector<std::vector<float>>> adc_values;
-    std::map<int, std::vector<double>> mod16_offsets_per_om;
-    std::map<int, std::vector<double>> mod16_sigmas_per_om;
-    std::map<int, std::vector<double>> mod16_chi2ndf_per_om;
-    std::map<int, std::vector<double>> mod16_data_per_om;
-
-    std::map<int, std::vector<std::vector<float>>> feb_adc_values;
-    std::map<int, std::vector<double>> feb_offsets_per_om;
-    std::map<int, std::vector<double>> feb_sigmas_per_om;
-    std::map<int, std::vector<double>> feb_chi2ndf_per_om;
-
-    std::map<int, std::vector<double>> eow_offsets_per_om;
-    std::map<int, std::vector<double>> eow_sigmas_per_om;
-    std::map<int, std::vector<double>> eow_chi2ndf_per_om;
-    std::map<int, std::vector<double>> eow_gausses_per_om;
-
-    static std::map<int, std::vector<std::vector<double>>> om_waveforms;
-    std:map<int, std::vector<double>> baseline_values_per_om;
-    std::map<int, double> avg_baseline_per_om;
-    // kept events per OM per FEB memory cell (0..1023).
-    // We'll fill this by counting non-EMPTY_BIN entries in feb_adc_values
-    std::map<int, std::vector<int>> kept_events_per_om_bin;
-
-
-    //////////////////////////////////////////////////////////////////////////////////////
-    ///////////////////// Finding and saving ADC_VAL range limit per OM //////////////////
-    //////////////////////////////////////////////////////////////////////////////////////
-
-    // Initialize a random generator
-    TRandom3 *gRandom = new TRandom3(0); // Seed with 0 for different sequences each run
-    int plot_count = 0;
-    // int count_eom_cut = 0;
-    int count_noisy_cut = 0;
-    int savedKeptPngCount = 0;
-
-
-    // --- Check for 10 consecutive bins > 2σ within first 976 bins ---
-    size_t savedPngCount = 0;
-    int count_peak_flag = 0;
-    int count_chi2 = 0;
-    int count_bld = 0;
-    int cut_gradient = 0;
-
-    for (int i = 0; i < max_entries; ++i){
-            tree->GetEntry(i);
-            event_num = i;
-            //if (i < 10) continue; // Skip first 10 events due to cleanliness of early data
-
-            for (int j = 0; j <calo_nohits; ++j){
-                if (wave->at(j).size() < 1024) continue; // Skip if waveform is too short
-                const vector<short>& w = wave->at(j);
-
-                //calculate the om number
-                int om_num_out = calculate_om_num(calo_type, calo_side, calo_wall, calo_column, calo_row, j);
-
-                // Calculate original baseline, stddev, and eom
-                baseline_orig = calculate_baseline976(wave->at(j));
-                stddev_orig = calculate_stddev976(wave->at(j), baseline_orig);
-                // eom_orig = calculate_eom976(wave->at(j), baseline_orig);
-                baseline_delta = baseline_orig - calculate_baseline96(wave->at(j));
-
-                // Linear fit
-                int npts = 976;
-                vector<double> x(npts), y(npts);
-                for (int ii = 0; ii < npts; ++ii) { x[ii] = ii; y[ii] = w[ii]; }
-                TGraph* gr_fit = new TGraph(npts, x.data(), y.data());
-                TFitResultPtr fit_result = gr_fit->Fit("pol1", "QS");
-                if (fit_result.Get() != nullptr) {
-                    intercept = fit_result->Parameter(0);
-                    gradient  = fit_result->Parameter(1);
-                    chi2ndf   = fit_result->Chi2() / fit_result->Ndf();
-                } else {
-                    intercept = y[0];
-                    gradient = 0;
-                    chi2ndf = 0;
-                }
-                baseline_diff = baseline_orig - intercept;
-
-                // Smooth waveform
-                vector<double> smooth(976);
-                for (int k = 0; k < 976; ++k) {
-                    double sum = 0; int count = 0;
-                    for (int s = -3; s <= 3; ++s) {
-                        int idx = k + s;
-                        if (idx >= 0 && idx < 976) { sum += w[idx]; count++; }
-                    }
-                    smooth[k] = sum / count;
-                }
-
-                // Pulse detection
-                peak_flag = 0;
-                int min_bins = 3, consec = 0, start_bin = -1, end_bin = -1;
-                for (int k = 0; k < 976; ++k) {
-                    double fit_k = intercept + gradient * k;
-                    double deviation = smooth[k] - fit_k;
-                    double slope = (k > 0 ? smooth[k] - smooth[k-1] : 0);
-                    bool above = fabs(deviation) > 2 * stddev_orig;
-                    bool nonflat = fabs(slope) > 0.25 * stddev_orig / 5;
-
-                    if (above && nonflat) { consec++; if (consec >= min_bins && start_bin<0) start_bin = k - min_bins +1; }
-                    else { if (start_bin>=0) { end_bin = k-1; break; } consec =0; }
-                }
-                if (start_bin>=0 && end_bin>start_bin) peak_flag = 1;
-
-
-                const std::vector<short>& wave_j = wave->at(j);
-                // Peak flag must be 0
-                if (peak_flag != 0) continue;
-
-                /// Fit must be good
-                if (chi2ndf > 5.7) continue;
-
-                // Baseline delta within ±0.6
-                if (baseline_delta < -0.6 || baseline_delta > 0.6) continue;
-
-                // Gradient essentially flat
-                if (gradient < -0.001 || gradient > 0.001) continue;
 
             
-            // --- Save a PNG for waveforms that are being kept and meet quality criteria ---
-            // if (eom_orig> 0.078) {
+                // --- Save a PNG for waveforms that are being kept and meet quality criteria ---
                 if (savedKeptPngCount < 10) {  // optional: limit number of saved PNGs
-                TCanvas* c = new TCanvas("c_kept", "Kept Waveform", 800, 600);
+                TCanvas* c = new TCanvas(Form("c_kept_%d", savedKeptPngCount),"Kept Waveform", 800, 600);
+
 
                 // Create the waveform graph
                 TGraph* g = new TGraph(wave_j.size());
@@ -602,9 +44,6 @@ int main(int argc, char* argv[])
                 // Add annotation
                 TLatex latex;
                 latex.SetTextSize(0.04);
-                // latex.DrawLatexNDC(0.65, 0.85, Form("EOM = %.4f", eom_orig));
-                // latex.DrawLatexNDC(0.65, 0.78, Form("Width = %.2f", noisy_val));
-                // latex.DrawLatexNDC(0.65, 0.78, Form("Consecutive = %zu", maxConsecutive));
 
                 // Save PNG 
                 c->SaveAs(Form("run_%d_kept_waveform_event%d_om%d_%d.png", run_number, event_num, om_num_out, savedKeptPngCount));
@@ -619,7 +58,6 @@ int main(int argc, char* argv[])
 
                 savedKeptPngCount++;
                 }
-            // }
 
 
                 int om_counter = 0;
@@ -646,9 +84,9 @@ int main(int argc, char* argv[])
                 for (int bin = 0; bin < 1024; ++bin) {
                     feb_adc_values[om_num_out][bin].push_back(reordered_waveform[bin]);
                 }
-
+                delete gr_fit;
             }
-        
+            
     }
   
     for (auto &pair : baseline_values_per_om) {
@@ -684,9 +122,6 @@ int main(int argc, char* argv[])
     // Process FEB_ADC_VALUES for histogramming
     for (auto& om_pair : feb_adc_values) {
         int om_num = om_pair.first;
-
-        // if (om_num != 1) continue; // Skip all OMs except OM 1 for now -----------------
-        // TCanvas *c = new TCanvas("c", "OM 1 Histograms", 800, 600); //------------------
 
         auto& adc_bins = om_pair.second;
 
@@ -983,7 +418,6 @@ int main(int argc, char* argv[])
     for (int i = 0; i < max_entries; ++i){
         tree->GetEntry(i);
         event_num = i;
-        //if (i < 10) continue; // Skip first 10 events due to cleanliness of early data
 
         for (int j = 0; j <calo_nohits; ++j){
             if (wave->at(j).size() < 1024) continue; // Skip if waveform is too short
@@ -996,10 +430,8 @@ int main(int argc, char* argv[])
             baseline_orig = calculate_baseline976(wave->at(j));
             baseline_delta = baseline_orig - calculate_baseline96(wave->at(j));
             stddev_orig = calculate_stddev976(wave->at(j), baseline_orig);
-            // eom_orig = calculate_eom976(wave->at(j), baseline_orig);
             end_baseline = calculate_baseline48(wave->at(j));
             end_stddev = calculate_stddev48(wave->at(j), end_baseline);
-            // end_eom = calculate_eom48(wave->at(j), end_baseline);
 
             // Linear fit
             int npts = 976;
@@ -1174,7 +606,6 @@ int main(int argc, char* argv[])
             // Step 4: calculate baseline, stddev, and eom on corrected waveform in original order
             baseline_feb = calculate_baseline976(corrected_wave);
             stddev_feb   = calculate_stddev976(corrected_wave, baseline_feb);
-            // eom_feb      = calculate_eom976(corrected_wave, baseline_feb);
 
             // 976 waveform correction ///////////////////////////////////////////////////////////////
 
@@ -1208,7 +639,7 @@ int main(int argc, char* argv[])
                 // Create blue (original) waveform
                 TGraph* g_before = new TGraph(976);
                 for (int bin = 0; bin < 976; ++bin)
-                    g_before->SetPoint(bin, bin, original_waveform_bins[bin]);
+                g_before->SetPoint(bin, bin, original_waveform_bins[bin]);
                 g_before->SetTitle(Form("OM %d Event %d Before/After Mod16;Bin;ADC", om_num, event_num));
                 g_before->SetLineColor(kBlue);
                 g_before->Draw("AL");  // Draw axes + blue line
@@ -1220,7 +651,7 @@ int main(int argc, char* argv[])
                 // Create red (corrected) waveform
                 TGraph* g_after = new TGraph(976);
                 for (int bin = 0; bin < 976; ++bin)
-                    g_after->SetPoint(bin, bin, corrected_with_baseline[bin]);
+                g_after->SetPoint(bin, bin, corrected_with_baseline[bin]);
                 g_after->SetLineColor(kRed);
                 g_after->Draw("L SAME");  // Draw red line on top of blue
 
@@ -1282,7 +713,6 @@ int main(int argc, char* argv[])
             // --- Calculate adjusted baseline, stddev, and eom ---
             baseline_976 = calculate_baseline976(wave->at(j));
             stddev_976 = calculate_stddev976(wave->at(j), baseline_976);
-            // eom_976 = calculate_eom976(wave->at(j), baseline_976);
 
          
             // Spike correction for bins 976–1023 /////////////////////////////////////////////////
@@ -1379,13 +809,14 @@ int main(int argc, char* argv[])
             // Recalculate baseline, stddev, and eom
             baseline_end = calculate_baseline48(wave->at(j));
             stddev_end   = calculate_stddev48(wave->at(j), baseline_end);
-            // eom_end      = calculate_eom48(wave->at(j), baseline_end);
 
             calo_fcr = fcr->at(j);
             
             ////////////////////////// Fill the Baseline Tree ////////////////////////////
             baseline_tree->Fill();
-        } 
+            delete gr_fit;
+        }
+        
     }
     std::cout << "Number of waveforms cut from peak flag: " << count_peak_flag << std::endl;
     std::cout << "Number of waveforms cut from goodness of fit: " << count_chi2 << std::endl;
